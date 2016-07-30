@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 
-import os
 import datetime
 import json
 import logging
+import os
 import random
 import re
 import sys
@@ -13,34 +13,21 @@ from geopy.geocoders import GoogleV3
 from pgoapi import PGoApi
 from pgoapi.utilities import f2i, get_cell_ids
 
-import logger
 import cell_workers
-from cell_workers.utils import distance, encode, i2f
+import logger
+from api_wrapper import ApiWrapper
+from cell_workers.utils import distance
+from event_manager import EventManager
 from human_behaviour import sleep
 from item_list import Item
 from metrics import Metrics
-from pokemongo_bot.event_handlers import LoggingHandler
-from pokemongo_bot.event_handlers import SocketIoHandler
+from pokemongo_bot.event_handlers import LoggingHandler, SocketIoHandler
 from pokemongo_bot.socketio_server.runner import SocketIoRunner
 from spiral_navigator import SpiralNavigator
 from worker_result import WorkerResult
-from event_manager import EventManager
-from api_wrapper import ApiWrapper
 
 
 class PokemonGoBot(object):
-
-    WORKERS = [
-        cell_workers.IncubateEggsWorker,
-        cell_workers.PokemonTransferWorker,
-        cell_workers.EvolveAllWorker,
-        cell_workers.RecycleItemsWorker,
-        cell_workers.CatchVisiblePokemonWorker,
-        cell_workers.MoveToFortWorker,
-        cell_workers.CatchLuredPokemonWorker,
-        cell_workers.SeenFortWorker
-    ]
-
     @property
     def position(self):
         return self.api._position_lat, self.api._position_lng, 0
@@ -55,13 +42,16 @@ class PokemonGoBot(object):
         self.cell = None
         self.recent_forts = [None] * config.forts_max_circle_size
         self.tick_count = 0
+        self.softban = False
 
         # Make our own copy of the workers for this instance
-        self.workers = list(self.WORKERS)
+        self.workers = []
+
 
     def start(self):
         self._setup_logging()
         self._setup_api()
+        self._setup_workers()
         self.navigator = SpiralNavigator(self)
         random.seed()
 
@@ -91,7 +81,7 @@ class PokemonGoBot(object):
         self.check_session(self.position[0:2])
 
         for worker in self.workers:
-            if worker(self).work() == WorkerResult.RUNNING:
+            if worker.work() == WorkerResult.RUNNING:
                 return
 
         self.navigator.take_step()
@@ -234,11 +224,24 @@ class PokemonGoBot(object):
     def check_session(self, position):
         # Check session expiry
         if self.api._auth_provider and self.api._auth_provider._ticket_expire:
+            
+            # prevent crash if return not numeric value
+            if not self.is_numeric(self.api._auth_provider._ticket_expire):
+                logger.log("Ticket expired value is not numeric", 'yellow')
+                return
+
             remaining_time = self.api._auth_provider._ticket_expire/1000 - time.time()
 
             if remaining_time < 60:
                 logger.log("Session stale, re-logging in", 'yellow')
                 self.login()
+
+    def is_numeric(self, s):
+        try: 
+            float(s)
+            return True
+        except ValueError:
+            return False
 
     def login(self):
         logger.log('Attempting login to Pokemon Go.', 'white')
@@ -273,6 +276,20 @@ class PokemonGoBot(object):
         self.update_inventory()
         # send empty map_cells and then our position
         self.update_web_location()
+
+    def _setup_workers(self):
+        self.workers = [
+            cell_workers.SoftBanWorker(self),
+            cell_workers.IncubateEggsWorker(self),
+            cell_workers.PokemonTransferWorker(self),
+            cell_workers.EvolveAllWorker(self),
+            cell_workers.RecycleItemsWorker(self),
+            cell_workers.CatchVisiblePokemonWorker(self),
+            cell_workers.SeenFortWorker(self),
+            cell_workers.MoveToFortWorker(self),
+            cell_workers.CatchLuredPokemonWorker(self),
+            cell_workers.SeenFortWorker(self)
+        ]
 
     def _print_character_info(self):
         # get player profile call
